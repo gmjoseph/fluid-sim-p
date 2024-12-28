@@ -1,0 +1,27 @@
+<html>
+    <head>
+        <style>
+            body {
+                background-color: black;
+                display: flex;
+                flex-flow: row;
+                align-items: center;
+                justify-content: center;
+                position: absolute;
+                top: 0;
+                right: 0;
+                left: 0;
+                bottom: 0;
+            }
+
+            canvas {
+                /* bottom to top flow, coordinate getters have to account for the transform */
+                transform: rotate(90deg);
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="canvas"></canvas>
+    </body>
+    <script src="./index.js" type="module"></script>
+</html>

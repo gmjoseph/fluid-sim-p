@@ -1,0 +1,470 @@
+<html>
+    <head>
+        <style>
+            body {
+                background-color: black;
+                display: flex;
+                flex-flow: row;
+                align-items: center;
+                justify-content: center;
+                position: absolute;
+                top: 0;
+                right: 0;
+                left: 0;
+                bottom: 0;
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="canvas" height="1000px" width="1000px"></canvas>
+    </body>
+    <script>
+        // some other references
+        // https://github.com/Janh2978/Real_time_Fluid_Simulation
+        const FPS = 1/60;
+        // cell size, this is the 'N' throughout the paper.
+        const N = 100;
+        // cell size accounting for the edge boundary cells added
+        const CSB = N + 2;
+        // amount of cells we need to allocate. we add 2 to account
+        // for boundary cells in the left, top, bottom, and right of
+        // the grid.
+        const SIZE = (CSB) ** 2;
+        // the boundary is always there in the data, but we may not want to
+        // show the boundary cells + their data at draw time.
+        const VIZ_BOUNDARY = false;
+
+        const MODES = {
+            Fan: 0,
+            Mouse: 1,
+        };
+        const MODE = MODES.Fan;
+
+        const state = {
+            canvas: null,
+            ctx: null,
+            // assume <u[i], v[i]> is current and <u0[i], v0[i]> is the previous step.
+            // velocity field arrays (<u, v>, i believe)
+            // i.e. u is the horizontal component, and v is the vertical
+            // assumes that initially there is a force field stored in u0, v0 to make
+            // up initial forces of <u0, v0>, where u0 and v0 are the previous values.
+            u: new Float32Array(SIZE),
+            u0: new Float32Array(SIZE),
+            v: new Float32Array(SIZE),
+            v0: new Float32Array(SIZE),
+            // todo
+            // x, x0 are density arrays, where density is a scalar density
+            // referenced in the paper as den [size] and dens_prev[size].
+            // recall that the whole point of this is to be a solver. we're solving ∂rho / ∂t,
+            // where rho is the density and ∂t is the time step.
+            // these two arrays will store the solutions (current and previous), which
+            // should be rates of change of density with respect to time t.
+            // we populate this based on mouse movements at the moment, but we could set it to always
+            // have some density near one wall and move towards the other.
+            // "This array is filled in by some part of the game engine which detects sources
+            // of density. In our prototype it is filled in from the user’s mouse movement."
+            // assume x0 is the previous and x is current.
+            x: new Float32Array(SIZE),
+            x0: new Float32Array(SIZE),
+            // Diffuse and viscocity constants.
+            diffuse: 0,
+            viscocity: 0,
+            // How quickly to make the thing dissipate. If it's 0, all the densities we introduce
+            // will stick around and be moved along the force field, meaning nothing will ever
+            // fade away in the simulation. Simulating smoke definitely requires a positive fade rate.
+            densityDecay: 0.02,
+            // When adding a source density with the mouse, how much density should be added.
+            sourceDensity: 10,
+            mouseDown: false,
+            // Previous mouse coordinates to drive the force field / potentially densities?
+            mouse0: null,
+            // Current mouse, to sample on each loop of the simulator.
+            mouse: null,
+        };
+
+        function drawCells(cb) {
+            const { ctx } = state;
+            const { height, width } = state.canvas
+
+            const fontScale = 0.32;
+            ctx.font = `${height / N * fontScale}px serif`;
+            ctx.textBaseLine = 'middle';
+            ctx.textAlign = 'center';
+
+            function drawWithBoundary() {
+                const dx = width / CSB;
+                const dy = height / CSB;
+                for (let y = 0; y < CSB; y++) { 
+                    for (let x = 0; x < CSB; x++) {
+                        // numbering left to right, top to bottom.
+                        const cx = x * dx + dx * 0.5;
+                        const cy = y * dy + dy * 0.5;
+                        // it's a boundary cell if we're at the very first on either axis (for the added 2)
+                        // or at the very last on either axis
+                        const isBoundary = x === 0 || y === 0 || x === CSB - 1 || y === CSB - 1;
+                        cb(ctx, x, y, cx, cy, dx, dy, isBoundary);
+                    }
+                }
+            }
+
+            function drawWithoutBoundary() {
+                const dx = width / N;
+                const dy = height / N;
+                for (let y = 0; y < N; y++) { 
+                    for (let x = 0; x < N; x++) {
+                        // numbering left to right, top to bottom.
+                        const cx = x * dx + dx * 0.5;
+                        const cy = y * dy + dy * 0.5;
+                        cb(ctx, x + 1, y + 1, cx, cy, dx, dy, false);
+                    }
+                }
+            }
+
+            if (VIZ_BOUNDARY) {
+                drawWithBoundary();
+            } else {
+                drawWithoutBoundary();
+            }
+        }
+
+        function drawCellDensity() {
+            // For cell indices.
+            // const cb = (ctx, x, y, cx, cy, dx, dy, isBoundary) => {
+            //     ctx.fillStyle = isBoundary ? 'red' : 'white';
+            //     const i = x + y * CSB;
+            //     ctx.fillText(i, cx, cy);
+            // };
+            const cb = (ctx, x, y, cx, cy, dx, dy, isBoundary) => {
+                const i = x + y * CSB;
+                const n = state.x[i];
+                ctx.fillStyle = isBoundary ? 'red' : 'white';
+                ctx.fillText(new Number(n.toFixed(2)), cx, cy);
+            }
+            drawCells(cb);
+        }
+
+        function fillCellDensity() {
+            const cb = (ctx, x, y, cx, cy, dx, dy, isBoundary) => {
+                const i = x + y * CSB;
+                const n = state.x[i];
+                // int cast
+                const d = (n * 255) | 0;
+                const o = d / 255;
+                ctx.fillStyle = isBoundary ? `rgba(${d}, ${d}, ${d}, ${o})` : `rgba(${(d + 50) % 255}, ${200}, ${d}, ${o})`;
+                ctx.fillRect(cx - dx * 0.5, cy - dy * 0.5, dx, dy);
+            }
+            drawCells(cb);
+        }
+
+        function draw() {
+            state.ctx.clearRect(0, 0, state.ctx.canvas.width, state.ctx.canvas.height);
+            fillCellDensity();
+            // drawCellDensity();
+        }
+
+        function IX(i, j) {
+            return i + j * CSB;
+        }
+
+        function solveLinear(x, x0, boundary, a, c) {
+            // gauss-seidel relaxation to solve for x[i] from x0[i].
+            // k max is from the research paper.
+            for (let k = 0; k < 20; k++) {
+                // notice that we only do this on non-boundary cells so we can sample the boundary.
+                for (let i = 1; i <= N; i++) {
+                    for (let j = 1; j <= N; j++) {
+                        x[IX(i, j)] = (x0[IX(i, j)] + a * (x[IX(i - 1, j)] + x[IX(i + 1, j)] + x[IX(i, j - 1)] + x[IX(i, j + 1)])) * (1 / c);
+                    }
+                }
+                setBoundary(x, boundary);
+            }
+        }
+
+        function setBoundary(target, boundary) {
+            // reordered:
+            // void set_bnd ( int N, int b, float * x )
+            // N is row and cell dimension, which we use CSB for
+            // b is the boundary integer which is [0, 2]
+            // x is the target array
+
+            /*
+             "We assume that the fluid is contained in a box with solid walls: no flow should
+             exit the walls. This simply means that the horizontal component of the velocity
+             should be zero on the vertical walls, while the vertical component of the velocity
+             should be zero on the horizontal walls. For the density and other fields considered
+             in the code we simply assume continuity. The following code implements these conditions."
+
+             "Other boundary conditions are of course possible. For example, we could assume
+             that the fluid wraps around itself: a flow that exits one wall simply reenters
+             the opposite one. Changing the above to handle this case is fairly straightforward
+             and is left as an exercise for the reader. Note that in this case the advect()
+             routine should also be modified. Another possibility is to have a fixed velocity
+             on some parts of the boundary to simulate an inflow like that found in a wind
+             tunnel. We encourage the reader to explore different boundary conditions."
+            */
+            const x = target;
+            const b = boundary;
+
+            for (let i = 1; i <= N; i++) {
+                // top, bottom most rows?
+                x[IX(0, i)] = b === 1 ? -x[IX(1, i)] : x[IX(1, i)];
+                x[IX(N + 1, i)] = b === 1 ? -x[IX(N, i)] : x[IX(N, i)];
+
+                // left, right most columns?
+                x[IX(i, 0)] = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+                x[IX(i, N + 1)] = b === 2 ? -x[IX(i, N)] : x[IX(i, N)];
+            }
+
+            // corners?
+            x[IX(0, 0)] = 0.5 * (x[IX(1, 0)] + x[IX(0, 1)]);
+            x[IX(0, N + 1)] = 0.5 * (x[IX(1, N + 1)] + x[IX(0, N)]);
+            x[IX(N + 1, 0)] = 0.5 * (x[IX(N, 0)] + x[IX(N + 1, 1)]);
+            x[IX(N + 1, N + 1)] = 0.5 * (x[IX(N, N + 1)] + x[IX(N + 1, N)]);
+        }
+
+        function diffuse(dt, target, source, diff, boundary) {
+            // reordered:
+            // void diffuse ( int N, int b, float * x, float * x0, float diff, float dt )
+            // N is row and cell dimension, which we use CSB for
+            // b is the boundary value [0, 2] i believe
+            // x and x0 are the target and source arrays.
+            // diff is a constant of our choosing for diffuse rate? maybe?
+            // dt is the delta time aka time step.
+            const a = dt * diff * N * N;
+            solveLinear(target, source, boundary, a, 1 + 4 * a)
+        }
+
+        function advect(dt, target, source, u, v, boundary) {
+            // reordered:
+            // void advect ( int N, int b, float * d, float * d0, float * u, float * v, float dt )
+            // N is the row and cell dimension, which we use CSB for
+            // b is the boundary value [0, 2] i believe
+            // d and d0 are the target and source arrays
+            // u and v are velocity vector component arrays, i believe (not necessarily state.u, state.v)
+            // dt is the delta time aka time step.
+
+            // uses a 'simple linear backtrace' to compute density diffusion
+            const dt0 = dt * N;
+            for (let i = 1; i <= N; i++) {
+                for (let j = 1; j <= N; j++) {
+                    // x and y vector components.
+                    let x = i - dt0 * u[IX(i, j)];
+                    let y = j - dt0 * v[IX(i, j)];
+
+                    if (x < 0.5) {
+                        x = 0.5;
+                    }
+                    if (x > N + 0.5) {
+                        x = N + 0.5;
+                    }
+                    
+                    if (y < 0.5) {
+                        y = 0.5;
+                    }
+                    if (y > N + 0.5) {
+                        y = N + 0.5;
+                    }
+
+                    // int cast
+                    const i0 = x | 0;
+                    const i1 = i0 + 1;
+
+                    // int cast
+                    const j0 = y | 0;
+                    const j1 = j0 + 1;
+
+                    const s1 = x - i0;
+                    const s0 = 1 - s1;
+                    
+                    const t1 = y - j0;
+                    const t0 = 1 - t1;
+
+                    target[IX(i, j)] = s0 * (t0 * source[IX(i0, j0)] + t1 * source[IX(i0, j1)]) + s1 * (t0 * source[IX(i1, j0)] + t1 * source[IX(i1, j1)]);
+                }
+            }
+            setBoundary(target, boundary);
+        }
+
+        function project(u, v, p, div) {
+            // reordered:?
+            // void project ( int N, float * u, float * v, float * p, float * div )
+            // N is the row and cell dimension, which we use CSB for
+            // u and v are velocity vector component arrays, i believe (not necessarily state.u, state.v)
+            // p and div also seem to be velocity vector component arrays, i believe (not necessarily state.u, state.v)
+
+            // the paper assumes the grid is normalized, so it can get a spacing of the grid using 1 / N (i.e.
+            // edge length / count of cells), but we already know that the spacing is width or height / N.
+            // however i'm not sure how much this matters...
+            const h = N;
+            for (let i = 1; i <= N; i++) {
+                for (let j = 1; j <= N; j++) {
+                    div[IX(i, j)] = -0.5 * h * (u[IX(i + 1, j)] - u[IX(i - 1, j)] + v[IX(i, j + 1)] - v[IX(i, j - 1)]);
+                    p[IX(i, j)] = 0;
+                }
+            }
+
+            setBoundary(div, 0);
+            setBoundary(p, 0);
+            solveLinear(p, div, 0, 1, 4);
+
+            for (let i = 1; i <= N; i++) {
+                for (let j = 1; j <= N; j++) {
+                    u[IX(i, j)] -= 0.5 * (p[IX(i + 1, j)] - p[IX(i - 1, j)]) * (1 / h);
+                    v[IX(i, j)] -= 0.5 * (p[IX(i, j + 1)] - p[IX(i, j - 1)]) * (1 / h);
+                }
+            }
+            setBoundary(u, 1);
+            setBoundary(v, 2);
+        }
+
+        function densityStep(dt) {
+            diffuse(dt, state.x0, state.x, state.diffuse, 0);
+            // combines what we did in the velocity step with what we're doing in the
+            // density step. i.e. this is the only touch point between the density
+            // and the velocity vector field.
+            advect(dt, state.x, state.x0, state.u, state.v, 0);
+        }
+
+        function velocityStep(dt) {
+            diffuse(dt, state.u0, state.u, state.viscocity, 1);
+            diffuse(dt, state.v0, state.v, state.viscocity, 2);
+            project(state.u0, state.v0, state.u, state.v)
+            advect(dt, state.u, state.u0, state.u0, state.v0, 1);
+            advect(dt, state.v, state.v0, state.u0, state.v0, 2);
+            project(state.u, state.v, state.u0, state.v0)
+        }
+
+        function fadeStep() {
+            // decrease the values otherwise theyll explode over time. i.e. remove density or dissipate
+            for (let i = 0; i < state.x.length; i++) {
+                state.x[i] -= state.densityDecay;
+                if (state.x[i] < 0) {
+                    state.x[i] = 0;
+                }
+                if (state.x[i] > 255) {
+                    state.x[i] = 255;
+                }
+            }
+        }
+
+        function update(dt) {
+            // the equation we deal with states (figure 1 for density, right to left)
+            // 1. density follows velocity field
+            // 2. density diffuses at certain rate
+            // 3. density increases due to sources (the + S)
+            // we solve it in reverse (add sources, diffuse, follow the velocity field)
+            velocityStep(dt);
+            densityStep(dt);
+            fadeStep();
+        }
+
+        function getCoords(e) {
+            const cx = (e.layerX - e.target.offsetLeft);
+            const cy = (e.layerY - e.target.offsetTop);
+            return { cx, cy };
+        }
+
+        function addMouseDensityForces() {
+            if (!state.mouseDown || !state.mouse0) {
+                return;
+            }
+
+            const { cx , cy } = getCoords(state.mouse);
+            const { cx: pcx, cy: pcy } = getCoords(state.mouse0);
+
+            // int cast
+            const tx = ((N / state.canvas.width) * cx) | 0;
+            const ty = ((N / state.canvas.height) * cy) | 0;
+
+            // even if we aren't visualizing the boundary tiles, they're still there and
+            // can get velocity and density influence. if we don't visualize them, then we
+            // simply won't show what's going on with them.
+            const index = tx + ty * CSB;
+
+            // add density to the centre cell and all those around it.
+            state.x[index] += state.sourceDensity;
+            state.x[index + 1] += state.sourceDensity;
+            state.x[index - 1] += state.sourceDensity;
+            state.x[index - CSB] += state.sourceDensity;
+            state.x[index + CSB] += state.sourceDensity;
+            
+            // add velocity
+            const xv = (N / state.canvas.width) * (cx - pcx);
+            const yv = (N / state.canvas.height) * (cy - pcy);
+            state.u[index] += xv * (2 / (Math.abs(xv) + 1)) * 15;
+            state.v[index] += yv * (2 / (Math.abs(yv) + 1)) * 15;
+        }
+
+        function addFanDensityForces() {
+            for (let j = 1; j <= N; j++) {
+                // Set all the lefthandmost non boundary x values to some density, and give them a force
+                // to move them inwards.
+                const i = 1;
+                const index = i + j * CSB;
+
+                // The closer we are to the middle, the higher the density + strong the force.
+                // [1, N] => [0, 1] => [-1, 1] => [0, 1] [1, 0]
+                const strength = 1 - Math.abs((j / N) * 2 - 1);
+                const vd = (j / N) * 2 - 1;
+                state.x[index] += state.sourceDensity * strength;
+                state.u[index] += 40 * strength;
+            }
+        }
+        
+        function setupState() {
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            state.canvas = canvas;
+            state.ctx = ctx;
+        }
+
+        function setupHandlers() {
+            const moveHandler = (e) => {
+                if (!state.mouse0) {
+                    state.mouse0 = e;
+                }
+                state.mouse0 = state.mouse;
+                state.mouse = e;
+            };
+            state.canvas.onmousedown = () => state.mouseDown = true;
+            state.canvas.onmousemove = moveHandler;
+            state.canvas.onmouseup = () => state.mouseDown = false;
+        }
+
+        function loop(densitySourceFunctions) {
+            const run = (t) => {
+                // 60 FPS, thugh the refresh may actually be higher...
+                // addMouseDensityForces();
+                densitySourceFunctions.forEach(fn => fn());
+                // Assuming on each draw that this happens at a rate of 60fps
+                update(FPS);
+                draw();
+                requestAnimationFrame(run);
+            }
+            requestAnimationFrame(run)
+        }
+
+        setupState();
+        setupHandlers();
+
+
+        if (MODE === MODES.Fan) {
+            state.densityDecay = 0.1;
+            state.sourceDensity = 5;
+            const densityForceSources = [
+                addFanDensityForces,
+            ];
+            loop(densityForceSources);
+        }
+
+        if (MODE === MODES.Mouse) {
+            state.densityDecay = 0.00002;
+            state.sourceDensity = 12;
+            const densityForceSources = [
+                addMouseDensityForces,
+            ];
+            loop(densityForceSources);
+        }
+
+    </script>
+</html>
